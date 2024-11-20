@@ -1,0 +1,209 @@
+---
+title: "Stats 506 Final Project"
+format: html
+editor: visual
+---
+
+# Stats 506 Final Project
+
+## **1. Problem:**
+
+### **How does the proportion of salary and wage income in the total income impact Medicare spending on imaging techniques across states?**
+
+```{r}
+library(tidyverse)
+library(stringr)
+```
+
+## 2. Import data
+
+```{r}
+medicare_2021 <- read.csv("/Users/nynn/Library/CloudStorage/OneDrive-Umich/Umich course/2024_Fall/Stats 506/Final_Project/Medicare_Physician_Other_Practitioners_by_Geography_and_Service_2021.csv")
+head(medicare_2021)
+summary(medicare_2021)
+
+zp20 <- read.csv("/Users/nynn/Library/CloudStorage/OneDrive-Umich/Umich course/2024_Fall/Stats 506/Final_Project/20zpallagi.csv")
+
+```
+
+## 3. Data preparation
+
+### 3.1 Calculate the income data based on tax
+
+```{r}
+zp20_econ <- zp20 %>%
+  #select(A02650, N02650, A00200, N00200)
+  group_by(STATE) %>%
+  summarise(total_income = 1000*sum(A02650),
+            total_returns = sum(N02650),
+            personal_income = total_income/total_returns,
+            personal_salary = 1000*sum(A00200)/sum(N00200),
+            prop = personal_salary/personal_income )
+hist(zp20_econ$personal_income)
+```
+
+### 3.2 Capture imaging techniques
+
+```{r}
+
+# Define the regex patterns for imaging techniques
+imaging_pattern <- "\\b(X-ray|CT[\\s\\(\\)]?|MRI[\\s\\(\\)]?)\\b"
+## X-ray, ignore case
+## CT, no character around it, only allow optional space or symbols
+## MRI,  no character around it, only allow optional space or symbols
+
+# Filter rows containing any imaging techniques,
+# Extract and standardize imaging technique as a new variable
+imaging_tech <- medicare_2021 %>%
+  filter(str_detect(HCPCS_Desc, regex(imaging_pattern, ignore_case = TRUE))) %>%
+  mutate(
+    technique = case_when(
+      str_detect(HCPCS_Desc, regex("\\bX-ray\\b", ignore_case = TRUE)) ~ "X-ray",
+      str_detect(HCPCS_Desc, regex("\\bCT\\b", ignore_case = TRUE)) ~ "CT",
+      str_detect(HCPCS_Desc, regex("\\bMRI\\b", ignore_case = TRUE)) ~ "MRI",
+      TRUE ~ NA_character_  # Default to NA if no match (shouldn't happen after filtering)
+    )
+  )
+
+# Calculate total spending for imaging techniques for each row
+imaging_spending <- imaging_tech %>%
+  mutate(total_spending_each = Avg_Mdcr_Pymt_Amt * Tot_Srvcs) %>%
+  group_by(Rndrng_Prvdr_Geo_Desc, technique) %>%
+  summarise(total_spending = sum(total_spending_each),
+            spending_per_serv = total_spending/sum(Tot_Srvcs),
+            State = unique(Rndrng_Prvdr_Geo_Desc) )%>%
+  ungroup() %>%
+  select(-Rndrng_Prvdr_Geo_Desc)
+
+ggplot(imaging_spending, aes(x = spending_per_serv, fill = technique)) +
+  geom_histogram(position = "dodge", binwidth = 10, alpha = 0.7) +
+  labs(
+    title = "Distribution of Spending Per Service by Technique",
+    x = "Spending Per Service",
+    y = "Count",
+    fill = "Technique"
+  ) +
+  theme_minimal() 
+```
+
+### 3.3 Bind technique spending with the location and income
+
+#### 3.3.1 Check state consistency
+
+```{r}
+# State in Income (51 regions)
+unique(zp20_econ$STATE)
+
+# State in Imaging Spending
+unique(imaging_spending$Rndrng_Prvdr_Geo_Desc)
+N_unknown <- nrow(imaging_spending[which(imaging_spending$Rndrng_Prvdr_Geo_Desc == "Unknown"),])
+prop_unknown <- N_unknown/nrow(imaging_spending)
+print(prop_unknown)
+
+# Match state names
+# Define a function to map state abbreviations to full names using switch
+state_abbreviation_to_full <- function(abbreviation) {
+  switch(abbreviation,
+         "AK" = "Alaska", "AL" = "Alabama", "AR" = "Arkansas", "AZ" = "Arizona",
+         "CA" = "California", "CO" = "Colorado", "CT" = "Connecticut", 
+         "DC" = "District of Columbia", "DE" = "Delaware", "FL" = "Florida",
+         "GA" = "Georgia", "HI" = "Hawaii", "IA" = "Iowa", "ID" = "Idaho", "IL" = "Illinois",
+         "IN" = "Indiana", "KS" = "Kansas", "KY" = "Kentucky", "LA" = "Louisiana",
+         "MA" = "Massachusetts", "MD" = "Maryland", "ME" = "Maine", "MI" = "Michigan",
+         "MN" = "Minnesota", "MO" = "Missouri", "MS" = "Mississippi", "MT" = "Montana",
+         "NC" = "North Carolina", "ND" = "North Dakota", "NE" = "Nebraska",
+         "NH" = "New Hampshire", "NJ" = "New Jersey", "NM" = "New Mexico",
+         "NV" = "Nevada", "NY" = "New York", "OH" = "Ohio", "OK" = "Oklahoma",
+         "OR" = "Oregon", "PA" = "Pennsylvania", "RI" = "Rhode Island","SC" = "South Carolina",
+         "SD" = "South Dakota", "TN" = "Tennessee", "TX" = "Texas", "UT" = "Utah",
+         "VA" = "Virginia", "VT" = "Vermont", "WA" = "Washington", "WI" = "Wisconsin",
+         "WV" = "West Virginia", "WY" = "Wyoming",
+         NA)  # Return NA if no match
+}
+
+# Apply the function to each abbreviation
+zp20_econ$STATE_full <- sapply(zp20_econ$STATE, state_abbreviation_to_full)
+
+```
+
+#### 3.3.2 Merge data - inner join
+
+```{r}
+income_spend <- merge(x = zp20_econ, y = imaging_spending,
+                      by.x = "STATE_full", by.y = "State")  %>%
+    mutate(spending_per_return = total_spending/total_returns)
+head(income_spend)
+```
+
+## 4. Regression model
+
+```{r}
+# Perform regression analysis
+model1 <- lm(spending_per_serv ~  technique + personal_income + technique:personal_income , data = income_spend)
+summary(model1)
+
+model2 <- lm(spending_per_return ~  technique + personal_income + technique:personal_income , data = income_spend)
+summary(model2)
+```
+
+```{r}
+coef_model1 <- summary(model1)$coefficients
+ci_model1 <- confint(model1)
+# Combine coefficients and confidence intervals into a single data frame for model 1
+result_model1 <- data.frame(
+  Parameter = rownames(coef_model1),
+  Estimate = coef_model1[, "Estimate"],
+  `Lower CI` = ci_model1[, 1],
+  `Upper CI` = ci_model1[, 2],
+  `p-value` = coef_model1[, "Pr(>|t|)"]
+)
+
+# Extract coefficients and confidence intervals for model 2
+coef_model2 <- summary(model2)$coefficients
+ci_model2 <- confint(model2)
+
+# Combine coefficients and confidence intervals into a single data frame for model 2
+result_model2 <- data.frame(
+  Parameter = rownames(coef_model2),
+  Estimate = coef_model2[, "Estimate"],
+  `Lower CI` = ci_model2[, 1],
+  `Upper CI` = ci_model2[, 2],
+  `p-value` = coef_model2[, "Pr(>|t|)"]
+)
+
+# Print results for model 1
+print("Model 1 Results")
+print(result_model1)
+
+# Print results for model 2
+print("Model 2 Results")
+print(result_model2)
+```
+
+```{r}
+ggplot(income_spend, aes(x = personal_income, y = spending_per_serv, color = technique)) +
+  geom_point(alpha = 0.6) +
+  #coord_cartesian(xlim = c(0.75, 0.85))+
+  geom_smooth(method = "lm", aes(group = technique), se = FALSE, span = 1) +
+  labs(
+    title = "Interaction Between Income and Spending per Service by Technique",
+    x = "Income/person at the state level",
+    y = "Average spending per service",
+    color = "Technique"
+  ) +
+  theme_minimal()
+
+
+ggplot(income_spend, aes(x = personal_income, y = spending_per_return, color = technique)) +
+  geom_point(alpha = 0.6) +
+  #coord_cartesian(xlim = c(0.75, 0.85))+
+  geom_smooth(method = "lm", aes(group = technique), se = FALSE, span = 1) +
+  labs(
+    title = "Interaction Between Income and Spending per Individual by Technique",
+    x = "Income/person at the state level",
+    y = "Average spending per person",
+    color = "Technique"
+  ) +
+  theme_minimal()
+
+```
